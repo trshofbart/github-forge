@@ -8,7 +8,7 @@ import { Forge, setPath, makeCommit } from './store.ts';
 import type { Repo } from './store.ts';
 import { parseCommit, commitHistory, ZERO_OID } from './git.ts';
 import {
-  HttpError, repoJson, issueJson, pullJson, createIssue, createPull,
+  HttpError, repoJson, issueJson, issueJsonText, pullJson, createIssue, createPull,
   mergePull, pullFiles, viewerIdentity, epochOf,
 } from './service.ts';
 import { executeGraphQL } from './graphql.ts';
@@ -41,6 +41,16 @@ function sendJson(res: ServerResponse, status: number, body: unknown, extra: Rec
 
 function sendError(res: ServerResponse, status: number, message: string): void {
   sendJson(res, status, { message });
+}
+
+/** sendJson for a body that is already serialized (hot read paths). */
+function sendText(res: ServerResponse, status: number, text: string): void {
+  requestSeq += 1;
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'x-github-request-id': `REQ-${requestSeq}`,
+  });
+  res.end(text);
 }
 
 async function readBody(req: IncomingMessage): Promise<Buffer> {
@@ -383,7 +393,7 @@ function routeIssues(
   if (sub.length === 0) {
     if (method === 'POST') {
       const issue = createIssue(forge, repo, json);
-      sendJson(res, 201, issueJson(forge, repo, issue));
+      sendText(res, 201, issueJsonText(forge, repo, issue));
       return;
     }
     if (method === 'GET') {
@@ -402,8 +412,9 @@ function routeIssues(
   const issue = Number.isNaN(number) ? undefined : repo.issues.get(number);
   if (!issue) throw new HttpError(404, 'Issue not found');
   if (sub.length === 1) {
-    if (method === 'GET') { sendJson(res, 200, issueJson(forge, repo, issue)); return; }
+    if (method === 'GET') { sendText(res, 200, issueJsonText(forge, repo, issue)); return; }
     if (method === 'PATCH') {
+      issue.version += 1;
       if (json.state === 'closed' || json.state === 'open') issue.state = json.state;
       if (typeof json.title === 'string') issue.title = json.title;
       if (typeof json.body === 'string') issue.body = json.body;
@@ -412,7 +423,7 @@ function routeIssues(
         for (const name of labels) if (!repo.labels.has(name)) throw new HttpError(422, `Label "${name}" does not exist`);
         issue.labels = labels;
       }
-      sendJson(res, 200, issueJson(forge, repo, issue));
+      sendText(res, 200, issueJsonText(forge, repo, issue));
       return;
     }
   }
@@ -431,6 +442,7 @@ function routeIssues(
       };
       repo.nextCommentId += 1;
       issue.comments.push(comment);
+      issue.version += 1;
       sendJson(res, 201, { id: comment.id, body: comment.body, created_at: comment.createdAt, user: { login: forge.viewerLogin } });
       return;
     }
@@ -542,7 +554,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
   if (segments[0] === 'api' && segments[1] === 'v3') {
-    const body = await readBody(req);
+    const body = (req.method === 'GET' || req.method === 'HEAD') ? Buffer.alloc(0) : await readBody(req);
     handleRest(req, res, segments, url.searchParams, body);
     return;
   }
@@ -564,6 +576,8 @@ export function createApp(): Server {
       else res.end();
     });
   });
+  // Small responses on loopback should not wait on Nagle/delayed-ACK pairing.
+  server.on('connection', (socket) => socket.setNoDelay(true));
   server.keepAliveTimeout = 75_000;
   server.headersTimeout = 76_000;
   return server;

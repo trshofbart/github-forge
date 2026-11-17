@@ -20,8 +20,10 @@ export function sha1Hex(data: Buffer): string {
 }
 
 export function objectId(type: ObjType, data: Buffer): string {
-  const header = Buffer.from(`${type} ${data.length}\0`, 'utf8');
-  return sha1Hex(Buffer.concat([header, data]));
+  const hash = createHash('sha1');
+  hash.update(`${type} ${data.length}\0`, 'utf8');
+  hash.update(data);
+  return hash.digest('hex');
 }
 
 /** A per-repository object store. */

@@ -590,6 +590,7 @@ function resolveMutation(ctx: Ctx, field: string, input: Record<string, unknown>
       const node = nodeById(ctx, String(input.issueId ?? ''));
       if (!node || node.t !== 'Issue') { ctx.errors.push({ message: 'Issue not found' }); return null; }
       node.issue.state = 'closed';
+      node.issue.version += 1;
       return { t: 'Payload', kind: field, repo: node.repo, issue: node.issue } as GObj;
     }
     if (field === 'createPullRequest') {
@@ -613,6 +614,7 @@ function resolveMutation(ctx: Ctx, field: string, input: Record<string, unknown>
       const comment = { id: node.repo.nextCommentId, body, createdAt: forge.stamp() };
       node.repo.nextCommentId += 1;
       node.issue.comments.push(comment);
+      node.issue.version += 1;
       const commentObj = { t: 'IssueComment', repo: node.repo, issue: node.issue, commentId: comment.id, body, createdAt: comment.createdAt } as GObj;
       return { t: 'Payload', kind: field, repo: node.repo, issue: node.issue, comment: commentObj } as GObj;
     }

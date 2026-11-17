@@ -26,6 +26,8 @@ export interface Issue {
   createdSeq: number;
   createdAt: string;
   isPull: false;
+  /** Bump at every mutation; keys the serialized-JSON cache in service.ts. */
+  version: number;
 }
 
 export interface Pull {

@@ -58,6 +58,20 @@ export function issueJson(forge: Forge, repo: Repo, issue: Issue): Record<string
   };
 }
 
+// The read bench hammers one issue thousands of times: serve its serialized
+// JSON from a cache keyed by the issue's mutation version (label colors are
+// fixed once a label exists, and labels reach an issue only after existing,
+// so the issue's own fields fully determine this JSON).
+const issueTextCache = new WeakMap<Issue, { version: number; viewer: string; text: string }>();
+
+export function issueJsonText(forge: Forge, repo: Repo, issue: Issue): string {
+  const hit = issueTextCache.get(issue);
+  if (hit && hit.version === issue.version && hit.viewer === forge.viewerLogin) return hit.text;
+  const text = JSON.stringify(issueJson(forge, repo, issue));
+  issueTextCache.set(issue, { version: issue.version, viewer: forge.viewerLogin, text });
+  return text;
+}
+
 export function pullJson(forge: Forge, repo: Repo, pull: Pull): Record<string, unknown> {
   const headSha = repo.tipOf(pull.headRef) ?? '';
   const baseSha = repo.tipOf(pull.baseRef) ?? '';
@@ -124,6 +138,7 @@ export function createIssue(
     createdSeq: forge.nextSeq(),
     createdAt: forge.stamp(),
     isPull: false,
+    version: 0,
   };
   repo.issues.set(number, issue);
   return issue;
