@@ -27,6 +27,9 @@ export function objectId(type: ObjType, data: Buffer): string {
 /** A per-repository object store. */
 export class ObjectStore {
   readonly objects = new Map<string, GitObject>();
+  /** Pack entry bytes (header + deflated data) per object id; objects are
+   *  immutable, so an entry once built never changes. */
+  readonly packEntries = new Map<string, Buffer>();
 
   put(type: ObjType, data: Buffer): string {
     const oid = objectId(type, data);
@@ -233,10 +236,14 @@ export function buildPack(store: ObjectStore, oids: string[]): Buffer {
   header.writeUInt32BE(oids.length, 8);
   parts.push(header);
   for (const oid of oids) {
-    const obj = store.get(oid);
-    if (!obj) continue;
-    parts.push(packEntryHeader(obj.type, obj.data.length));
-    parts.push(deflateSync(obj.data));
+    let entry = store.packEntries.get(oid);
+    if (!entry) {
+      const obj = store.get(oid);
+      if (!obj) continue;
+      entry = Buffer.concat([packEntryHeader(obj.type, obj.data.length), deflateSync(obj.data)]);
+      if (store.packEntries.size < 100_000) store.packEntries.set(oid, entry);
+    }
+    parts.push(entry);
   }
   const body = Buffer.concat(parts);
   const trailer = createHash('sha1').update(body).digest();
@@ -320,8 +327,8 @@ export function readPack(store: ObjectStore, pack: Buffer): string[] {
         offset += 1;
         baseOffset = ((baseOffset + 1) << 7) | (c & 0x7f);
       }
-      const data = inflateSync(pack.subarray(offset, end));
-      offset += compressedLength(pack, offset, end, size);
+      const { out: data, consumed } = inflateExact(pack.subarray(offset, end));
+      offset += consumed;
       const pending: Pending = { type: 'blob', baseOffset: start - baseOffset, delta: data, start };
       pendings.push(pending);
       byStart.set(start, pending);
@@ -329,16 +336,16 @@ export function readPack(store: ObjectStore, pack: Buffer): string[] {
       // REF_DELTA: 20-byte base id.
       const baseOid = pack.toString('hex', offset, offset + 20);
       offset += 20;
-      const data = inflateSync(pack.subarray(offset, end));
-      offset += compressedLength(pack, offset, end, size);
+      const { out: data, consumed } = inflateExact(pack.subarray(offset, end));
+      offset += consumed;
       const pending: Pending = { type: 'blob', baseOid, delta: data, start };
       pendings.push(pending);
       byStart.set(start, pending);
     } else {
       const type = CODE_TYPES[typeCode];
       if (!type) throw new Error(`pack entry type ${typeCode}`);
-      const data = inflateSync(pack.subarray(offset, end));
-      offset += compressedLength(pack, offset, end, size);
+      const { out: data, consumed } = inflateExact(pack.subarray(offset, end));
+      offset += consumed;
       if (data.length !== size) throw new Error('pack entry size mismatch');
       const pending: Pending = { type, data, start };
       pendings.push(pending);
@@ -370,27 +377,14 @@ export function readPack(store: ObjectStore, pack: Buffer): string[] {
   return added;
 }
 
-/** Length of the zlib stream starting at `offset` whose inflated size is `expected`. */
-function compressedLength(pack: Buffer, offset: number, end: number, expected: number): number {
-  // Any prefix at or past the true stream end inflates to `expected` (trailing bytes
-  // are ignored); a shorter prefix throws or inflates short. Binary-search the
-  // smallest prefix that inflates to exactly `expected`.
-  let lo = 1;
-  let hi = end - offset;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    let ok = false;
-    try {
-      ok = inflateSync(pack.subarray(offset, offset + mid)).length === expected;
-    } catch {
-      ok = false;
-    }
-    if (ok) hi = mid;
-    else lo = mid + 1;
-  }
-  const out = inflateSync(pack.subarray(offset, offset + lo));
-  if (out.length !== expected) throw new Error('cannot find zlib stream end');
-  return lo;
+/** Inflate the zlib stream at the start of `data`, reporting how many input
+ *  bytes it consumed, in one inflate (the engine tracks bytes written). */
+function inflateExact(data: Buffer): { out: Buffer; consumed: number } {
+  const res = inflateSync(data, { info: true }) as unknown as {
+    buffer: Buffer;
+    engine: { bytesWritten: number };
+  };
+  return { out: res.buffer, consumed: res.engine.bytesWritten };
 }
 
 // ---------------------------------------------------------------- pkt-line

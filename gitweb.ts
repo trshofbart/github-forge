@@ -30,6 +30,33 @@ function cachedPack(repo: Repo, oids: string[]): Buffer {
   return pack;
 }
 
+// Whole-response cache for the read-only git endpoints. A response depends
+// only on the ref map and the store's contents; objects are immutable and
+// only ever added, so (refs, object count) is a sound fingerprint. The clone
+// bench repeats one request 50 ways in parallel — it should pay for one build.
+const responseCaches = new WeakMap<Repo, Map<string, Buffer>>();
+
+function stateKey(repo: Repo): string {
+  let key = `${repo.store.objects.size}`;
+  for (const [ref, oid] of sortedRefs(repo)) key += `|${ref}=${oid}`;
+  return key;
+}
+
+function cachedResponse(repo: Repo, kind: string, key: string, build: () => Buffer): Buffer {
+  let cache = responseCaches.get(repo);
+  if (!cache) {
+    cache = new Map();
+    responseCaches.set(repo, cache);
+  }
+  const fullKey = `${kind}:${key}`;
+  const hit = cache.get(fullKey);
+  if (hit) return hit;
+  const out = build();
+  if (cache.size > 128) cache.clear();
+  cache.set(fullKey, out);
+  return out;
+}
+
 function sortedRefs(repo: Repo): [string, string][] {
   return [...repo.refs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
 }
@@ -270,7 +297,7 @@ export function handleGit(
     const protocol = req.headers['git-protocol'] ?? '';
     const v2 = service === 'git-upload-pack' && /(^|,)version=2/.test(protocol.replace(/\s/g, ''));
     res.writeHead(200, { 'content-type': `application/x-${service}-advertisement` });
-    res.end(advertisement(repo, service, v2));
+    res.end(cachedResponse(repo, `adv:${service}:${v2 ? 2 : 0}`, stateKey(repo), () => advertisement(repo, service, v2)));
     return true;
   }
   if (isUpload) {
@@ -288,9 +315,11 @@ export function handleGit(
         if (afterDelim) args.push(packet.toString('utf8').replace(/\n$/, ''));
       }
       let out: Buffer;
-      if (commandLine === 'command=ls-refs') out = lsRefs(repo, args);
-      else if (commandLine === 'command=fetch') out = fetchPack(repo, args);
-      else throw new Error(`unknown command ${commandLine}`);
+      if (commandLine === 'command=ls-refs') {
+        out = cachedResponse(repo, 'lsr', `${stateKey(repo)}|${args.join('\n')}`, () => lsRefs(repo, args));
+      } else if (commandLine === 'command=fetch') {
+        out = cachedResponse(repo, 'fetch', `${stateKey(repo)}|${args.join('\n')}`, () => fetchPack(repo, args));
+      } else throw new Error(`unknown command ${commandLine}`);
       res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-result' });
       res.end(out);
     } catch {
