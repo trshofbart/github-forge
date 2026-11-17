@@ -3,7 +3,7 @@
 // initialize handshake. The tool list is a fixed literal so two tools/list
 // calls are byte-identical.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { RawRequest, RawResponse } from './transport.ts';
 import type { Forge, Repo } from './store.ts';
 import { HttpError, repoJson, issueJson, pullJson, createIssue, createPull, mergePull } from './service.ts';
 
@@ -189,7 +189,7 @@ function callTool(forge: Forge, name: string, args: Record<string, unknown>): Rp
   return null;
 }
 
-export function handleMcp(forge: Forge, req: IncomingMessage, res: ServerResponse, body: Buffer, token: string): void {
+export function handleMcp(forge: Forge, req: RawRequest, res: RawResponse, body: Buffer, token: string): void {
   const send = (status: number, payload: unknown): void => {
     const text = payload === null ? '' : JSON.stringify(payload);
     res.writeHead(status, { 'content-type': 'application/json' });

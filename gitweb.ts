@@ -2,7 +2,7 @@
 // and v0 receive-pack with report-status. Packs sent are plain (no deltas) and
 // cached per (repo, object set) so the 50-way shallow-clone bench reuses one build.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { RawRequest, RawResponse } from './transport.ts';
 import type { Forge, Repo } from './store.ts';
 import type { ObjectStore } from './git.ts';
 import {
@@ -269,8 +269,8 @@ function receivePack(repo: Repo, body: Buffer): Buffer {
 
 export function handleGit(
   forge: Forge,
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: RawRequest,
+  res: RawResponse,
   owner: string,
   repoName: string,
   rest: string[],

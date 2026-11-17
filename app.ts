@@ -2,8 +2,8 @@
 // /api/graphql, MCP at /mcp, and git smart HTTP at /{owner}/{repo}.git.
 // One in-memory store (see store.ts) backs every surface.
 
-import { createServer as httpCreateServer } from 'node:http';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { createRawServer } from './transport.ts';
+import type { RawRequest, RawResponse, RawServer } from './transport.ts';
 import { Forge, setPath, makeCommit } from './store.ts';
 import type { Repo } from './store.ts';
 import { parseCommit, commitHistory, ZERO_OID } from './git.ts';
@@ -22,13 +22,13 @@ function token(): string {
   return process.env.MAKEFUN_SHOP_TOKEN ?? '';
 }
 
-function authed(req: IncomingMessage): boolean {
+function authed(req: RawRequest): boolean {
   const expected = token();
   if (!expected) return true;
   return (req.headers.authorization ?? '') === `Bearer ${expected}`;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
+function sendJson(res: RawResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
   requestSeq += 1;
   const text = body === null || body === undefined ? '' : JSON.stringify(body);
   res.writeHead(status, {
@@ -39,24 +39,18 @@ function sendJson(res: ServerResponse, status: number, body: unknown, extra: Rec
   res.end(text);
 }
 
-function sendError(res: ServerResponse, status: number, message: string): void {
+function sendError(res: RawResponse, status: number, message: string): void {
   sendJson(res, status, { message });
 }
 
 /** sendJson for a body that is already serialized (hot read paths). */
-function sendText(res: ServerResponse, status: number, text: string): void {
+function sendText(res: RawResponse, status: number, text: string): void {
   requestSeq += 1;
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'x-github-request-id': `REQ-${requestSeq}`,
   });
   res.end(text);
-}
-
-async function readBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks);
 }
 
 function parseJsonBody(body: Buffer): { value: Record<string, unknown> } | { error: true } {
@@ -118,7 +112,7 @@ function commitJson(repo: Repo, sha: string): Record<string, unknown> {
   };
 }
 
-function handleRest(req: IncomingMessage, res: ServerResponse, segments: string[], query: URLSearchParams, body: Buffer): void {
+function handleRest(req: RawRequest, res: RawResponse, segments: string[], query: URLSearchParams, body: Buffer): void {
   const method = req.method ?? 'GET';
   // segments[0] === 'api', segments[1] === 'v3'
   const rest = segments.slice(2);
@@ -159,8 +153,8 @@ function handleRest(req: IncomingMessage, res: ServerResponse, segments: string[
 }
 
 function routeRest(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: RawRequest,
+  res: RawResponse,
   method: string,
   rest: string[],
   query: URLSearchParams,
@@ -210,7 +204,7 @@ function routeRest(
 }
 
 function routeRepo(
-  res: ServerResponse,
+  res: RawResponse,
   method: string,
   repo: Repo,
   sub: string[],
@@ -304,7 +298,7 @@ function routeRepo(
 }
 
 function routeContents(
-  res: ServerResponse,
+  res: RawResponse,
   method: string,
   repo: Repo,
   pathSegs: string[],
@@ -383,7 +377,7 @@ function routeContents(
 }
 
 function routeIssues(
-  res: ServerResponse,
+  res: RawResponse,
   method: string,
   repo: Repo,
   sub: string[],
@@ -451,7 +445,7 @@ function routeIssues(
 }
 
 function routePulls(
-  res: ServerResponse,
+  res: RawResponse,
   method: string,
   repo: Repo,
   sub: string[],
@@ -503,7 +497,7 @@ function routePulls(
 
 // ------------------------------------------------------------------ GraphQL
 
-function handleGraphQL(req: IncomingMessage, res: ServerResponse, body: Buffer): void {
+function handleGraphQL(req: RawRequest, res: RawResponse, body: Buffer): void {
   if (!req.headers.authorization) {
     sendError(res, 401, 'Unauthorized');
     return;
@@ -534,7 +528,7 @@ function handleGraphQL(req: IncomingMessage, res: ServerResponse, body: Buffer):
 
 // ------------------------------------------------------------------ server
 
-async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handle(req: RawRequest, res: RawResponse, body: Buffer): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const rawSegments = url.pathname.split('/').filter((s) => s.length > 0);
   const segments = rawSegments.map((s) => decode(s));
@@ -544,43 +538,29 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
   if (segments[0] === 'api' && segments[1] === 'graphql') {
-    const body = await readBody(req);
     handleGraphQL(req, res, body);
     return;
   }
   if (segments[0] === 'mcp' && segments.length === 1) {
-    const body = req.method === 'POST' ? await readBody(req) : Buffer.alloc(0);
-    handleMcp(forge, req, res, body, token());
+    handleMcp(forge, req, res, req.method === 'POST' ? body : Buffer.alloc(0), token());
     return;
   }
   if (segments[0] === 'api' && segments[1] === 'v3') {
-    const body = (req.method === 'GET' || req.method === 'HEAD') ? Buffer.alloc(0) : await readBody(req);
-    handleRest(req, res, segments, url.searchParams, body);
+    handleRest(req, res, segments, url.searchParams, (req.method === 'GET' || req.method === 'HEAD') ? Buffer.alloc(0) : body);
     return;
   }
   // Git smart HTTP: /{owner}/{repo}.git/...
   if (segments.length >= 3 && (segments[1] as string).endsWith('.git')) {
     const owner = segments[0] as string;
     const repoName = (segments[1] as string).slice(0, -4);
-    const body = req.method === 'POST' ? await readBody(req) : Buffer.alloc(0);
-    const handled = handleGit(forge, req, res, owner, repoName, segments.slice(2), url.searchParams, body);
+    const handled = handleGit(forge, req, res, owner, repoName, segments.slice(2), url.searchParams, req.method === 'POST' ? body : Buffer.alloc(0));
     if (handled) return;
   }
   sendError(res, 404, 'Not Found');
 }
 
-export function createApp(): Server {
-  const server = httpCreateServer((req, res) => {
-    handle(req, res).catch(() => {
-      if (!res.headersSent) sendError(res, 500, 'Internal error');
-      else res.end();
-    });
-  });
-  // Small responses on loopback should not wait on Nagle/delayed-ACK pairing.
-  server.on('connection', (socket) => socket.setNoDelay(true));
-  server.keepAliveTimeout = 75_000;
-  server.headersTimeout = 76_000;
-  return server;
+export function createApp(): RawServer {
+  return createRawServer((req, res, body) => handle(req, res, body));
 }
 
 export { ZERO_OID };
